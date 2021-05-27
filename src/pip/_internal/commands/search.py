@@ -6,8 +6,14 @@ import xmlrpc.client
 from collections import OrderedDict
 from optparse import Values
 from typing import TYPE_CHECKING, Dict, List, Optional
+from urllib.parse import urlparse, urlunparse
 
 from pip._vendor.packaging.version import parse as parse_version
+from pip._vendor import html5lib
+from pip._vendor import requests
+# import html5lib
+# import requests
+
 
 from pip._internal.cli.base_command import Command
 from pip._internal.cli.req_command import SessionCommandMixin
@@ -68,21 +74,35 @@ class SearchCommand(Command, SessionCommandMixin):
     def search(self, query, options):
         # type: (List[str], Values) -> List[Dict[str, str]]
         index_url = options.index
+        return webpage_search(index_url, query)
 
-        session = self.get_default_session(options)
 
-        transport = PipXmlrpcTransport(index_url, session)
-        pypi = xmlrpc.client.ServerProxy(index_url, transport)
-        try:
-            hits = pypi.search({'name': query, 'summary': query}, 'or')
-        except xmlrpc.client.Fault as fault:
-            message = "XMLRPC request failed [code: {code}]\n{string}".format(
-                code=fault.faultCode,
-                string=fault.faultString,
-            )
-            raise CommandError(message)
-        assert isinstance(hits, list)
-        return hits
+def webpage_search(base_url, query):
+    # type: (str, str) -> List[Dict[str, str]]
+    """Use the search page of pip to return search results.
+
+    The need for this is caused by the XMLRPC search endpoint being disabled.
+    """
+    results = []
+    url = urlunparse(urlparse(base_url)._replace(path="/search"))
+    response = requests.get(url, params={"q": query})
+    response.raise_for_status()
+    content = html5lib.html5parser.parse(
+        response.content, namespaceHTMLElements=False
+    )
+    for result in content.findall(".//*[@class='package-snippet']"):
+        name = result.find("h3/*[@class='package-snippet__name']").text
+        version = result.find("h3/*[@class='package-snippet__version']").text
+        if not name or not version:
+            continue
+
+        description = result.find(
+            "p[@class='package-snippet__description']"
+        ).text
+
+        results.append(dict(name=name, version=version, summary=description))
+
+    return results
 
 
 def transform_hits(hits):
